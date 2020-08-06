@@ -25,6 +25,7 @@ pub enum NetworkMessage {
   Err(NetworkError),
   NewSession(String),
   ClientConnected,
+  Reconnect,
   EndSession,
   Data(String),
   RawData(Vec<u8>)
@@ -41,7 +42,8 @@ impl NetworkMessage {
         msg
       },
       Err(e) => {
-        panic!("{:?}", e);
+        println!("{:?}", e);
+        NetworkMessage::Null
       }
     }
   }
