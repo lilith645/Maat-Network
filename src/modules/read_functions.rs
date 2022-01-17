@@ -2,71 +2,79 @@ use std::io::ErrorKind;
 
 use mio::Interest;
 
-use crate::{
-  modules::{ConnectionType, EventHandler, NetworkStream},
-  register_connection,
-};
+use crate::modules::{write_functions::write_ones, ConnectionType, EventHandler, NetworkStream};
 
-pub fn print_data(
-  handler: &mut EventHandler,
-  connection: &ConnectionType,
-  data: &[u8],
-) -> Vec<NetworkStream> {
-  println!("{:?}", data);
+fn recieve_data(stream: &mut ConnectionType) -> Vec<u8> {
+  let mut bytes_read = 0;
+  let mut recieved_data = vec![0; 4096];
 
-  Vec::new()
+  loop {
+    match stream.read(&mut recieved_data[bytes_read..]) {
+      Ok(0) => {
+        // close connection
+        panic!("Should close connection");
+      }
+      Ok(n) => {
+        bytes_read += n;
+        if bytes_read == recieved_data.len() {
+          recieved_data.resize(recieved_data.len() + 1024, 0);
+        }
+      }
+      Err(ref e) if ErrorKind::WouldBlock == e.kind() => {
+        break;
+      }
+      Err(ref e) if ErrorKind::Interrupted == e.kind() => {
+        continue;
+      }
+      Err(e) => {
+        panic!("An error occured: {}", e);
+      }
+    }
+  }
+
+  recieved_data[..bytes_read].to_vec()
 }
 
-pub fn udp_read(
-  handler: &mut EventHandler,
-  connection: &ConnectionType,
-  data: &[u8],
-) -> Vec<NetworkStream> {
-  println!("{:?}", data);
-
-  Vec::new()
+pub fn print_data(connection: &mut ConnectionType) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
+  (Vec::new(), Vec::new())
 }
 
-pub fn handle_client_read(
-  handler: &mut EventHandler,
-  connection: &ConnectionType,
-  data: &[u8],
-) -> Vec<NetworkStream> {
-  println!("Recieved data from client: {:?}", data);
+pub fn udp_read(connection: &mut ConnectionType) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
+  (Vec::new(), Vec::new())
+}
 
-  Vec::new()
+pub fn read_data_from_client(
+  connection: &mut ConnectionType,
+) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
+  let data = recieve_data(connection);
+  (Vec::new(), data)
+}
+
+pub fn read_data_from_server(
+  connection: &mut ConnectionType,
+) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
+  (Vec::new(), Vec::new())
 }
 
 pub fn accept_connections(
-  handler: &mut EventHandler,
-  connection: &ConnectionType,
-  data: &[u8],
-) -> Vec<NetworkStream> {
+  connection: &mut ConnectionType,
+) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
   let mut streams = Vec::new();
+  let mut data = Vec::new();
 
-  match connection.accept() {
-    Ok((new_connection, address)) => {
-      println!("Accepting connection");
-      println!("    Address: {}", address);
+  loop {
+    match connection.accept() {
+      Ok((new_connection, address)) => {
+        streams.push((ConnectionType::from(new_connection), address.to_string()));
+      }
+      Err(e) if e.kind() == ErrorKind::WouldBlock => {
+        break;
+      }
+      Err(e) => {
+        panic!("read_functions: error accepting connection: {}", e);
+      }
+    };
+  }
 
-      let stream = register_connection(
-        handler,
-        ConnectionType::TcpStream(new_connection),
-        address.to_string(),
-        Some(Box::new(handle_client_read)),
-        None,
-        Interest::READABLE | Interest::WRITABLE,
-      );
-
-      streams.push(stream);
-    }
-    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-      println!("{}", e);
-    }
-    Err(e) => {
-      panic!("{}", e);
-    }
-  };
-
-  streams
+  (streams, data)
 }
