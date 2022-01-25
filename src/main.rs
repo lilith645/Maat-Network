@@ -4,17 +4,13 @@ use mio::{Interest, Token};
 use clap::Parser;
 
 use core::time::Duration;
-use std::io::ErrorKind;
-use std::net::SocketAddr;
 
 use modules::{
-  read_functions::{accept_connections, read_data_from_client, read_data_from_server, udp_read},
-  write_functions::write_ones,
+  read_functions::{accept_connections, print_data, recieve_data},
   ConnectionType, EventHandler, NetworkStream,
 };
 
-pub type ReadFunc = Box<dyn Fn(&mut ConnectionType) -> (Vec<(ConnectionType, String)>, Vec<u8>)>;
-pub type WriteFunc = Box<dyn Fn(&mut ConnectionType, &mut Vec<u8>)>;
+pub type ReadFunc = Box<dyn Fn(&mut ConnectionType, &[u8]) -> Vec<(ConnectionType, String)>>;
 
 mod modules;
 
@@ -23,6 +19,29 @@ pub const TCP_SERVER_PORT: &str = "6767";
 pub const UDP_SERVER_ADDRESS: &str = "0.0.0.0";
 pub const UDP_SERVER_PORT: &str = "6768";
 
+pub struct NewConnection {
+  pub token: usize,
+  pub connection: ConnectionType,
+  pub addr: String,
+  pub read_func: Option<ReadFunc>,
+}
+
+impl NewConnection {
+  pub fn new(
+    token: usize,
+    connection: ConnectionType,
+    addr: &str,
+    read_func: Option<ReadFunc>,
+  ) -> NewConnection {
+    NewConnection {
+      token,
+      connection: create_connection(connection, addr),
+      addr: addr.into(),
+      read_func,
+    }
+  }
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args {
@@ -30,224 +49,322 @@ pub struct Args {
   client: bool,
 }
 
-use mio::event::Event;
-use mio::Registry;
-use std::collections::HashMap;
-use std::io::{self, Read, Write};
-use std::str::from_utf8;
-
-const SERVER: Token = Token(0);
-
-const DATA: &[u8] = b"Hello world!\n";
-
-//fn main() -> io::Result<()> {
-//  test_main();
-//  return Ok(());
-//
-//  let args = Args::parse();
-//
-//  if args.client {
-//  } else {
-//  }
-//
-//  let mut network = EventHandler::new();
-//  let mut connections = HashMap::new();
-//
-//  connections.insert(
-//    SERVER,
-//    NetworkStream::new(
-//      "",
-//      SERVER,
-//      network.poll.registry(),
-//      Interest::READABLE,
-//      ConnectionType::add_existing_tcp_listener(
-//        TcpListener::bind(
-//          format!("{}:{}", TCP_SERVER_ADDRESS, TCP_SERVER_PORT)
-//            .parse()
-//            .unwrap(),
-//        )
-//        .unwrap(),
-//      ),
-//      Some(Box::new(accept_connections)),
-//      None,
-//    ),
-//  );
-//
-//  let mut unique_token = Token(SERVER.0 + 1);
-//
-//  println!("You can connect to the server using `nc`:");
-//  println!(" $ nc {} {}", TCP_SERVER_ADDRESS, TCP_SERVER_PORT);
-//  println!("You'll see our welcome message and anything you type will be printed here.");
-//
-//  loop {
-//    network
-//      .poll
-//      .poll(&mut network.events, Some(Duration::ZERO))?;
-//
-//    let mut new_connections = network
-//      .events
-//      .iter()
-//      .map(|event| match event.token() {
-//        SERVER => {
-//          let mut new_connections = Vec::new();
-//          loop {
-//            match connections.get(&SERVER).unwrap().stream.accept() {
-//              Ok((connection, address)) => new_connections.push((connection, address)),
-//              Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-//                // ignore
-//                break;
-//              }
-//              Err(e) => {
-//                println!("Server read error: {}", e);
-//                break;
-//              }
-//            };
-//          }
-//
-//          new_connections
-//        }
-//        token => {
-//          if let Some(c) = connections.get_mut(&token) {
-//            let done = {
-//              let stream = &mut c.stream;
-//              match stream {
-//                ConnectionType::TcpStream(stream) => {
-//                  handle_connection_event(network.poll.registry(), stream, event).unwrap()
-//                }
-//                _ => false,
-//              }
-//            };
-//
-//            if done {
-//              c.deregister(network.poll.registry());
-//            }
-//          }
-//
-//          Vec::new()
-//        }
-//      })
-//      .flatten()
-//      .collect::<Vec<(TcpStream, SocketAddr)>>();
-//
-//    new_connections
-//      .drain(..)
-//      .map(|(c, _addr)| {
-//        let token = next(&mut unique_token);
-//        (token, c)
-//      })
-//      .for_each(|(token, connection)| {
-//        connections.insert(
-//          token,
-//          NetworkStream::new(
-//            "",
-//            token,
-//            network.poll.registry(),
-//            Interest::READABLE.add(Interest::WRITABLE),
-//            ConnectionType::add_existing_tcp_stream(connection),
-//            Some(Box::new(accept_connections)),
-//            None,
-//          ),
-//        );
-//      });
-//  }
-//}
-//
-//fn next(current: &mut Token) -> Token {
-//  let next = current.0;
-//  current.0 += 1;
-//  Token(next)
-//}
-//
-///// Returns `true` if the connection is done.
-//fn handle_connection_event(
-//  registry: &Registry,
-//  connection: &mut TcpStream,
-//  event: &Event,
-//) -> io::Result<bool> {
-//  if event.is_writable() {
-//    // We can (maybe) write to the connection.
-//    match connection.write(DATA) {
-//      // We want to write the entire `DATA` buffer in a single go. If we
-//      // write less we'll return a short write error (same as
-//      // `io::Write::write_all` does).
-//      Ok(n) if n < DATA.len() => return Err(io::ErrorKind::WriteZero.into()),
-//      Ok(_) => {
-//        // After we've written something we'll reregister the connection
-//        // to only respond to readable events.
-//        registry.reregister(connection, event.token(), Interest::READABLE)?
-//      }
-//      // Would block "errors" are the OS's way of saying that the
-//      // connection is not actually ready to perform this I/O operation.
-//      Err(ref err) if would_block(err) => {}
-//      // Got interrupted (how rude!), we'll try again.
-//      Err(ref err) if interrupted(err) => {
-//        return handle_connection_event(registry, connection, event)
-//      }
-//      // Other errors we'll consider fatal.
-//      Err(err) => return Err(err),
-//    }
-//  }
-//
-//  if event.is_readable() {
-//    let mut connection_closed = false;
-//    let mut received_data = vec![0; 4096];
-//    let mut bytes_read = 0;
-//    // We can (maybe) read from the connection.
-//    loop {
-//      match connection.read(&mut received_data[bytes_read..]) {
-//        Ok(0) => {
-//          // Reading 0 bytes means the other side has closed the
-//          // connection or is done writing, then so are we.
-//          connection_closed = true;
-//          break;
-//        }
-//        Ok(n) => {
-//          bytes_read += n;
-//          if bytes_read == received_data.len() {
-//            received_data.resize(received_data.len() + 1024, 0);
-//          }
-//        }
-//        // Would block "errors" are the OS's way of saying that the
-//        // connection is not actually ready to perform this I/O operation.
-//        Err(ref err) if would_block(err) => break,
-//        Err(ref err) if interrupted(err) => continue,
-//        // Other errors we'll consider fatal.
-//        Err(err) => return Err(err),
-//      }
-//    }
-//
-//    if bytes_read != 0 {
-//      let received_data = &received_data[..bytes_read];
-//      if let Ok(str_buf) = from_utf8(received_data) {
-//        println!("Received data: {}", str_buf.trim_end());
-//      } else {
-//        println!("Received (none UTF-8) data: {:?}", received_data);
-//      }
-//    }
-//
-//    if connection_closed {
-//      println!("Connection closed");
-//      return Ok(true);
-//    }
-//  }
-//
-//  Ok(false)
-//}
-//
-//fn would_block(err: &io::Error) -> bool {
-//  err.kind() == io::ErrorKind::WouldBlock
-//}
-//
-//fn interrupted(err: &io::Error) -> bool {
-//  err.kind() == io::ErrorKind::Interrupted
-//}
-
 pub struct NetworkData {
   token: usize,
   data: Vec<u8>,
 }
 
-pub struct MaatNetwork {}
+pub struct MaatNetwork {
+  event_handler: EventHandler,
+  connections: Vec<NetworkStream>,
+  new_connections: Vec<NewConnection>,
+  pending_data: Vec<(usize, Vec<u8>)>,
+}
+
+impl MaatNetwork {
+  pub fn new() -> MaatNetwork {
+    MaatNetwork {
+      event_handler: EventHandler::new(),
+      connections: Vec::new(),
+      new_connections: Vec::new(),
+      pending_data: Vec::new(),
+    }
+  }
+
+  pub fn host_tcp_server<S, A>(&mut self, addr: S, port: A, read_func: Option<ReadFunc>) -> usize
+  where
+    S: Into<String>,
+    A: Into<String>,
+  {
+    let token = self.event_handler.next_token();
+    self.new_connections.push(NewConnection::new(
+      token,
+      ConnectionType::NewTcpListener,
+      &format!("{}:{}", addr.into(), port.into()),
+      Some(read_func.unwrap_or(Box::new(accept_connections))),
+    ));
+    token
+  }
+
+  pub fn host_udp_server<S, A>(&mut self, addr: S, port: A, read_func: Option<ReadFunc>) -> usize
+  where
+    S: Into<String>,
+    A: Into<String>,
+  {
+    let token = self.event_handler.next_token();
+    self.new_connections.push(NewConnection::new(
+      token,
+      ConnectionType::NewUdpSocket,
+      &format!("{}:{}", addr.into(), port.into()),
+      read_func,
+    ));
+    token
+  }
+
+  pub fn connect_to_tcp<S, A>(&mut self, addr: S, port: A, read_func: Option<ReadFunc>) -> usize
+  where
+    S: Into<String>,
+    A: Into<String>,
+  {
+    let token = self.event_handler.next_token();
+    self.new_connections.push(NewConnection::new(
+      token,
+      ConnectionType::NewTcpStream,
+      &format!("{}:{}", addr.into(), port.into()),
+      read_func,
+    ));
+
+    token
+  }
+
+  pub fn add_exisiting_connection(&mut self, connection: NewConnection) {
+    self.new_connections.push(connection);
+  }
+
+  pub fn add_existing_tcp_listener<S, A>(
+    &mut self,
+    listener: TcpListener,
+    addr: S,
+    port: A,
+    read_func: Option<ReadFunc>,
+  ) -> usize
+  where
+    S: Into<String>,
+    A: Into<String>,
+  {
+    let token = self.event_handler.next_token();
+    self.new_connections.push(NewConnection::new(
+      token,
+      ConnectionType::from(listener),
+      &format!("{}:{}", addr.into(), port.into()),
+      read_func,
+    ));
+    token
+  }
+
+  pub fn add_existing_udp_connection<S, A>(
+    &mut self,
+    udp: UdpSocket,
+    addr: S,
+    port: A,
+    read_func: Option<ReadFunc>,
+  ) -> usize
+  where
+    S: Into<String>,
+    A: Into<String>,
+  {
+    let token = self.event_handler.next_token();
+    self.new_connections.push(NewConnection::new(
+      token,
+      ConnectionType::from(udp),
+      &format!("{}:{}", addr.into(), port.into()),
+      read_func,
+    ));
+    token
+  }
+
+  pub fn add_existing_tcp_connection<S, A>(
+    &mut self,
+    tcp_connection: TcpStream,
+    addr: S,
+    port: A,
+    read_func: Option<ReadFunc>,
+  ) -> usize
+  where
+    S: Into<String>,
+    A: Into<String>,
+  {
+    let token = self.event_handler.next_token();
+    self.new_connections.push(NewConnection::new(
+      token,
+      ConnectionType::from(tcp_connection),
+      &format!("{}:{}", addr.into(), port.into()),
+      read_func,
+    ));
+
+    token
+  }
+
+  pub fn removed_connection(&mut self, token: usize) {
+    self
+      .connections
+      .iter_mut()
+      .filter(|x| {
+        if let Some(t) = x.token() {
+          t.0 == token
+        } else {
+          false
+        }
+      })
+      .for_each(|c| c.deregister(self.event_handler.poll.registry()));
+  }
+
+  pub fn write_data(&mut self, token: usize, data: &[u8]) {
+    let mut found_connection = false;
+    self
+      .connections
+      .iter_mut()
+      .filter(|c| {
+        if let Some(t) = c.token() {
+          t.0 == token
+        } else {
+          false
+        }
+      })
+      .for_each(|c| {
+        found_connection = true;
+        c.data_to_write(data);
+      });
+
+    if !found_connection {
+      self.pending_data.push((token, data.to_vec()));
+    }
+  }
+
+  pub fn poll(
+    &mut self,
+  ) -> (
+    Vec<(usize, Vec<u8>)>,
+    Vec<NewConnection>,
+    Vec<Option<usize>>,
+  ) {
+    if let Err(e) = self
+      .event_handler
+      .poll
+      .poll(&mut self.event_handler.events, Some(Duration::ZERO))
+    {
+      println!("Error polling events: {}", e);
+    }
+
+    let mut events = 0;
+
+    let mut recieved_data = Vec::new();
+
+    let mut new_connections = self
+      .event_handler
+      .events
+      .iter()
+      .map(|i| {
+        events += 1;
+        i
+      })
+      .map(|e| {
+        self
+          .connections
+          .iter_mut()
+          .filter(|c| !c.unregistered())
+          .filter(|c| c.token().unwrap() == e.token())
+          .enumerate()
+          .filter_map(|(i, v)| if i == 0 { Some(v) } else { None })
+          .map(|connection| {
+            let mut new_connections = Vec::new();
+
+            let mut should_close = false;
+
+            if e.is_readable() {
+              let (data, close) = recieve_data(&mut connection.stream);
+              let new_con = &mut NetworkStream::is_readable(connection, &data);
+              new_connections.append(new_con);
+              if !data.is_empty() {
+                recieved_data.push((connection.token().unwrap().0, data));
+              }
+
+              should_close = close;
+            }
+            if e.is_writable() && connection.data_pending() {
+              NetworkStream::is_writeable(connection);
+            }
+
+            if should_close {
+              connection.deregister(self.event_handler.poll.registry());
+            }
+
+            new_connections
+          })
+          .flatten()
+          .collect::<Vec<(ConnectionType, String)>>()
+      })
+      .flatten()
+      .collect::<Vec<(ConnectionType, String)>>();
+
+    let new_connections = new_connections
+      .drain(..)
+      .map(|(c, addr)| {
+        NewConnection::new(
+          self.event_handler.next_token(),
+          c,
+          &addr,
+          Some(Box::new(print_data)),
+        )
+      })
+      .collect();
+
+    let removed_connections: Vec<Option<usize>> = self
+      .connections
+      .iter()
+      .filter(|x| x.unregistered())
+      .map(|x| {
+        if let Some(token) = x.token {
+          Some(token.0)
+        } else {
+          None
+        }
+      })
+      .collect::<Vec<Option<usize>>>();
+
+    self.connections = self
+      .connections
+      .drain(..)
+      .filter(|x| !x.unregistered())
+      .map(|mut x| {
+        if x.did_write() {
+          x.reregister(
+            &mut self.event_handler,
+            Interest::READABLE.add(Interest::WRITABLE),
+          );
+        }
+        x
+      })
+      .collect::<Vec<NetworkStream>>();
+
+    self.connections.append(
+      &mut (self
+        .new_connections
+        .drain(..)
+        .map(|connection| NetworkStream::from(connection))
+        .map(|mut x| {
+          if x.unregistered() {
+            x.register(
+              self.event_handler.poll.registry(),
+              x.token().unwrap(),
+              Interest::READABLE.add(Interest::WRITABLE),
+            );
+          }
+
+          x
+        })
+        .map(|mut x| {
+          self.pending_data = self
+            .pending_data
+            .drain(..)
+            .filter_map(|(t, d)| {
+              if t == x.token().unwrap().0 {
+                x.data_to_write(&d);
+                None
+              } else {
+                Some((t, d))
+              }
+            })
+            .collect::<Vec<(usize, Vec<u8>)>>();
+
+          x
+        })
+        .collect::<Vec<NetworkStream>>()),
+    );
+
+    (recieved_data, new_connections, removed_connections)
+  }
+}
 
 impl NetworkData {
   pub fn new(token: usize, data: &[u8]) -> NetworkData {
@@ -265,308 +382,72 @@ impl NetworkData {
   }
 }
 
-//pub fn register_connection<S: Into<String>>(
-//  handler: &mut EventHandler,
-//  stream: ConnectionType,
-//  addr: S,
-//  read_func: Option<ReadFunc>,
-//  write_func: Option<WriteFunc>,
-//  interest: Interest,
-//) -> NetworkStream {
-//  let token = handler.next_token();
-//
-//  let stream = {
-//    match stream {
-//      ConnectionType::NewTcpListener => {
-//        let listener = TcpListener::bind(addr.into().parse().unwrap()).unwrap();
-//        ConnectionType::from(listener)
-//      }
-//      ConnectionType::NewTcpStream => {
-//        let stream = TcpStream::connect(addr.into().parse().unwrap()).unwrap();
-//        ConnectionType::from(stream)
-//      }
-//      ConnectionType::NewUdpSocket => {
-//        let udp = UdpSocket::bind(addr.into().parse().unwrap()).unwrap();
-//        ConnectionType::from(udp)
-//      }
-//      _ => stream,
-//    }
-//  };
-//
-//  let stream = NetworkStream::new(
-//    Token(token),
-//    handler.poll.registry(),
-//    interest,
-//    stream,
-//    read_func,
-//    write_func,
-//  );
-//
-//  return stream;
-//}
-
-fn create_connection<S: Into<String>, T: Into<String>>(
+fn create_connection<S>(
   connection_type: ConnectionType,
   addr: S,
-  port: T,
-) -> ConnectionType {
+  //port: T,
+) -> ConnectionType
+where
+  S: Into<String>,
+{
   match connection_type {
-    ConnectionType::NewTcpListener => ConnectionType::from(
-      TcpListener::bind(format!("{}:{}", addr.into(), port.into()).parse().unwrap()).unwrap(),
-    ),
-    ConnectionType::NewTcpStream => ConnectionType::from(
-      TcpStream::connect(format!("{}:{}", addr.into(), port.into()).parse().unwrap()).unwrap(),
-    ),
-    ConnectionType::NewUdpSocket => ConnectionType::from(
-      UdpSocket::bind(format!("{}:{}", addr.into(), port.into()).parse().unwrap()).unwrap(),
-    ),
+    ConnectionType::NewTcpListener => {
+      ConnectionType::from(TcpListener::bind(format!("{}", addr.into()).parse().unwrap()).unwrap())
+    }
+    ConnectionType::NewTcpStream => {
+      ConnectionType::from(TcpStream::connect(format!("{}", addr.into()).parse().unwrap()).unwrap())
+    }
+    ConnectionType::NewUdpSocket => {
+      ConnectionType::from(UdpSocket::bind(format!("{}", addr.into()).parse().unwrap()).unwrap())
+    }
     c => c,
   }
 }
 
-fn register_stream(
-  mut connection: NetworkStream,
-  registry: &Registry,
-  token: Token,
-  interest: Interest,
-) -> NetworkStream {
-  connection.register(registry, token, interest);
-  connection
-}
-
-fn add_stream<S: Into<String>>(
-  addr: S,
-  mut connections: Vec<NetworkStream>,
-  connection: ConnectionType,
-  read_func: Option<ReadFunc>,
-  write_func: Option<WriteFunc>,
-) -> Vec<NetworkStream> {
-  connections.push(NetworkStream::from_connection(
-    connection,
-    addr.into(),
-    read_func,
-    write_func,
-  ));
-
-  connections
-}
-
 fn main() {
-  let mut network = EventHandler::new();
+  let args = Args::parse();
 
-  let mut connections: Vec<NetworkStream> = Vec::new();
+  let mut network = MaatNetwork::new();
 
-  connections.push(NetworkStream::from_connection(
-    create_connection(
-      ConnectionType::NewTcpListener,
+  let mut tokens: Vec<usize> = Vec::new();
+
+  let mut client_token = None;
+
+  if args.client {
+    tokens.push(network.connect_to_tcp("127.0.0.1", TCP_SERVER_PORT, Some(Box::new(print_data))));
+    client_token = Some(*tokens.last().unwrap());
+    network.write_data(client_token.unwrap() as usize, &[9, 2, 3, 4, 6]);
+  } else {
+    tokens.push(network.host_tcp_server(
       TCP_SERVER_ADDRESS,
       TCP_SERVER_PORT,
-    ),
-    format!("{}:{}", TCP_SERVER_ADDRESS, TCP_SERVER_PORT),
-    Some(Box::new(accept_connections)),
-    None,
-  ));
+      Some(Box::new(accept_connections)),
+    ));
+  }
 
   loop {
-    if let Err(e) = network.poll.poll(&mut network.events, Some(Duration::ZERO)) {
-      println!("Error polling events: {}", e);
+    let (mut recieved_data, mut new_connections, mut removed_connections) = network.poll();
+
+    recieved_data.drain(..).for_each(|(t, d)| {
+      println!("token: {} data {:?}", t, d);
+    });
+
+    if let Some(c_token) = client_token {
+      network.write_data(client_token.unwrap() as usize, &[9, 2, 3, 4, 6]);
     }
 
-    let mut new_connections = network
-      .events
-      .iter()
-      .map(|e| {
-        connections
-          .iter_mut()
-          .filter(|c| !c.unregistered())
-          .filter(|c| c.token().unwrap() == e.token())
-          .enumerate()
-          .filter_map(|(i, v)| if i == 0 { Some(v) } else { None })
-          .map(|connection| {
-            let mut new_connections = Vec::new();
-            if e.is_readable() {
-              let (new_con, data) = &mut NetworkStream::is_readable(connection);
-              new_connections.append(new_con);
-              if !data.is_empty() {
-                println!("{:?}", data);
-              }
-            }
-            if e.is_writable() {
-              let mut data = Vec::new();
-              NetworkStream::is_writeable(connection, &mut data);
-            }
+    new_connections.drain(..).for_each(|c| {
+      println!("Token: {}", c.token);
+      tokens.push(c.token);
+      network.add_exisiting_connection(c);
+    });
 
-            new_connections
-          })
-          .flatten()
-          .collect::<Vec<(ConnectionType, String)>>()
-          .drain(..)
-          .map(|(c, addr)| {
-            NetworkStream::from_connection(c, addr, Some(Box::new(read_data_from_client)), None)
-          })
-          .collect::<Vec<NetworkStream>>()
-      })
-      .flatten()
-      .collect::<Vec<NetworkStream>>();
-
-    connections = connections
-      .drain(..)
-      .chain(new_connections.drain(..))
-      .map(|mut x| {
-        if x.unregistered() {
-          let token = Token(network.next_token());
-          x.register(
-            network.poll.registry(),
-            token,
-            Interest::READABLE.add(Interest::WRITABLE),
-          );
-        }
-
-        x
-      })
-      .collect::<Vec<NetworkStream>>();
+    removed_connections.drain(..).for_each(|t| {
+      println!("Removed token: {:?}", t);
+      tokens = tokens.drain(..).filter(|token| t != Some(*token)).collect();
+      if let Some(t) = t {
+        network.removed_connection(t);
+      }
+    })
   }
 }
-
-//pub fn poll(handler: &mut EventHandler, connections: &mut Vec<NetworkStream>) -> Vec<NetworkData> {
-//  handler
-//    .poll
-//    .poll(&mut handler.events, Some(Duration::ZERO))
-//    .unwrap();
-//
-//  let mut data = Vec::new();
-//
-//  let mut should_read = Vec::new();
-//  let mut should_write = Vec::new();
-//
-//  let mut new_connections = Vec::new();
-//
-//  for event in handler.events.iter() {
-//    match event.token() {
-//      token => {
-//        for i in 0..connections.len() {
-//          if connections[i].token.eq(&token) {
-//            if event.is_writable() {
-//              should_write.push(i);
-//            }
-//            if event.is_readable() {
-//              should_read.push(i);
-//            }
-//          }
-//        }
-//      }
-//    }
-//  }
-//
-//  for i in 0..connections.len() {
-//    if should_read.contains(&i) {
-//      let mut bytes_read = 0;
-//      let mut recieved_data = vec![0; 4096];
-//
-//      loop {
-//        match connections[i].stream.read(&mut recieved_data[bytes_read..]) {
-//          Ok(0) => {
-//            // close connection
-//            panic!("Should close connection");
-//            break;
-//          }
-//          Ok(n) => {
-//            println!("bytes read");
-//            bytes_read += n;
-//            if bytes_read == recieved_data.len() {
-//              recieved_data.resize(recieved_data.len() + 1024, 0);
-//            }
-//          }
-//          Err(ref e) if ErrorKind::WouldBlock == e.kind() => {
-//            break;
-//          }
-//          Err(ref e) if ErrorKind::Interrupted == e.kind() => {
-//            continue;
-//          }
-//          Err(e) => {
-//            panic!("An error occured: {}", e);
-//          }
-//        }
-//      }
-//
-//      new_connections
-//        .append(&mut connections[i].is_readable(handler, &recieved_data[..bytes_read]));
-//
-//      //connections[i].reregister(handler, Interest::WRITABLE.add(Interest::READABLE));
-//      data.push(NetworkData::new(
-//        connections[i].token.0,
-//        &recieved_data[..bytes_read],
-//      ));
-//    }
-//
-//    if should_write.contains(&i) {
-//      let mut data = Vec::with_capacity(1024);
-//      connections[i].is_writeable(handler, &mut data);
-//      //connections[i].reregister(handler, Interest::READABLE);
-//    }
-//  }
-//
-//  connections.append(&mut new_connections);
-//
-//  data
-//}
-
-//
-//fn main() {
-//  let mut connections = Vec::new();
-//  let mut network = EventHandler::new();
-//
-//  let args = Args::parse();
-//
-//  if args.client {
-//    println!("Starting client:");
-//    println!("    server: {}", TCP_SERVER_ADDRESS);
-//
-//    let stream = register_connection(
-//      &mut network,
-//      ConnectionType::tcp_stream(),
-//      TCP_SERVER_ADDRESS,
-//      Some(Box::new(read_data_from_server)),
-//      Some(Box::new(write_ones)),
-//      Interest::READABLE.add(Interest::WRITABLE),
-//    );
-//
-//    connections.push(stream);
-//  } else {
-//    println!("Starting server on:");
-//    println!("    tcp: {}", TCP_SERVER_ADDRESS);
-//    //println!("    udp: {}", UDP_SERVER_ADDRESS);
-//
-//    let stream = register_connection(
-//      &mut network,
-//      ConnectionType::tcp_listener(),
-//      TCP_SERVER_ADDRESS,
-//      Some(Box::new(accept_connections)),
-//      None,
-//      //Some(Box::new(write_ones)),
-//      Interest::READABLE,
-//    );
-//    //let udp = register_connection(
-//    //  &mut network,
-//    //  ConnectionType::udp_socket(),
-//    //  UDP_SERVER_ADDRESS,
-//    //  Some(Box::new(udp_read)),
-//    //  None,
-//    //  Interest::READABLE,
-//    //);
-//
-//    connections.push(stream);
-//    //connections.push(udp);
-//  }
-//
-//  loop {
-//    let data = poll(&mut network, &mut connections);
-//    data.iter().for_each(|d| {
-//      if d.data.len() > 0 {
-//        d.debug()
-//      }
-//    });
-//
-//    //connections.iter().for_each(|c| println!("{}", c.token()));
-//  }
-//}

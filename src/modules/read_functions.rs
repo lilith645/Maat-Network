@@ -4,15 +4,17 @@ use mio::Interest;
 
 use crate::modules::{write_functions::write_ones, ConnectionType, EventHandler, NetworkStream};
 
-fn recieve_data(stream: &mut ConnectionType) -> Vec<u8> {
+pub fn recieve_data(stream: &mut ConnectionType) -> (Vec<u8>, bool) {
+  let mut should_close = false;
+
   let mut bytes_read = 0;
   let mut recieved_data = vec![0; 4096];
 
   loop {
     match stream.read(&mut recieved_data[bytes_read..]) {
       Ok(0) => {
-        // close connection
-        panic!("Should close connection");
+        should_close = true;
+        break;
       }
       Ok(n) => {
         bytes_read += n;
@@ -32,35 +34,23 @@ fn recieve_data(stream: &mut ConnectionType) -> Vec<u8> {
     }
   }
 
-  recieved_data[..bytes_read].to_vec()
+  (recieved_data[..bytes_read].to_vec(), should_close)
 }
 
-pub fn print_data(connection: &mut ConnectionType) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
-  (Vec::new(), Vec::new())
-}
-
-pub fn udp_read(connection: &mut ConnectionType) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
-  (Vec::new(), Vec::new())
-}
-
-pub fn read_data_from_client(
-  connection: &mut ConnectionType,
-) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
+pub fn print_data(connection: &mut ConnectionType, data: &[u8]) -> Vec<(ConnectionType, String)> {
   let data = recieve_data(connection);
-  (Vec::new(), data)
+  Vec::new()
 }
 
-pub fn read_data_from_server(
-  connection: &mut ConnectionType,
-) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
-  (Vec::new(), Vec::new())
+pub fn udp_read(connection: &mut ConnectionType) -> Vec<(ConnectionType, String)> {
+  Vec::new()
 }
 
 pub fn accept_connections(
   connection: &mut ConnectionType,
-) -> (Vec<(ConnectionType, String)>, Vec<u8>) {
+  data: &[u8],
+) -> Vec<(ConnectionType, String)> {
   let mut streams = Vec::new();
-  let mut data = Vec::new();
 
   loop {
     match connection.accept() {
@@ -76,5 +66,5 @@ pub fn accept_connections(
     };
   }
 
-  (streams, data)
+  streams
 }

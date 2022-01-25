@@ -1,5 +1,6 @@
 use std::{
   convert::From,
+  fmt,
   io::{Error, ErrorKind, Read, Write},
   net::SocketAddr,
 };
@@ -12,6 +13,24 @@ use mio::{
 use mio::Registry;
 
 use crate::modules::EventHandler;
+
+impl fmt::Debug for ConnectionType {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("ConnectionType")
+      .field(
+        "ConnectionType",
+        match self {
+          ConnectionType::NewTcpListener => &"NewTcpListener",
+          ConnectionType::NewTcpStream => &"NewTcpStream",
+          ConnectionType::NewUdpSocket => &"NewUdpSocket",
+          ConnectionType::TcpListener(_) => &"TcpListener",
+          ConnectionType::TcpStream(_) => &"TcpStream",
+          ConnectionType::UdpSocket(_) => &"UdpSocket",
+        },
+      )
+      .finish()
+  }
+}
 
 pub enum ConnectionType {
   NewTcpListener,
@@ -77,7 +96,9 @@ impl ConnectionType {
           panic!("{}", e);
         }
       }
-      _ => {}
+      _ => {
+        panic!("Attempting to register a connection that doesn't exist");
+      }
     }
   }
 
